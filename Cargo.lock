@@ -1686,7 +1686,7 @@ dependencies = [
  "pkcs8",
  "proptest",
  "rand 0.8.6",
- "rustls-pemfile",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha1 0.10.6",
