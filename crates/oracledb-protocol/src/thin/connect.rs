@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use zeroize::Zeroize;
 
 /// Whether the connect data travels inline in the CONNECT packet. Longer
 /// descriptors must be sent in a separate DATA packet right after the CONNECT
@@ -663,7 +664,7 @@ pub fn build_auth_phase_two_token_frame(
     let capacity = prefix.len() + measure.into_bytes().len();
     let mut writer = TtcWriter::with_capacity(capacity);
     writer.write_raw(&prefix);
-    super::auth::write_auth_phase_two_token(
+    let written = super::auth::write_auth_phase_two_token(
         &mut writer,
         user,
         token,
@@ -673,13 +674,171 @@ pub fn build_auth_phase_two_token_frame(
         edition,
         pop,
         proxy_user,
-    )?;
-    let frame = writer.into_bytes();
+    );
+    #[cfg(test)]
+    let written = frame_fault::after_write(written);
+    let mut frame = writer.into_bytes();
+    // Both error paths are unreachable by construction. If one is ever reached, the partly or
+    // wrongly written frame is wiped over its full capacity before the error returns, so no clear
+    // token is left behind.
+    if let Err(e) = written {
+        wipe_frame(&mut frame);
+        return Err(e);
+    }
+    #[cfg(test)]
+    frame_fault::grow(&mut frame);
     if frame.len() != capacity {
-        // Unreachable by construction; refuse rather than hand back a frame that may have moved.
+        // The buffer may have moved (its pre-growth allocation is already gone): refuse the frame.
+        wipe_frame(&mut frame);
         return Err(ProtocolError::TtcDecode(
             "token frame length changed while writing",
         ));
     }
     Ok(frame)
+}
+
+/// Test-only fault hook for the two unreachable error paths of
+/// [`build_auth_phase_two_token_frame`], and an observer of the buffer at return.
+#[cfg(test)]
+pub(crate) mod frame_fault {
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Fault {
+        None,
+        FailWrite,
+        Grow,
+    }
+
+    thread_local! {
+        pub(crate) static FAULT: Cell<Fault> = const { Cell::new(Fault::None) };
+        /// (len, every byte zero) of the buffer an error path wiped.
+        pub(crate) static SEEN: RefCell<Option<(usize, bool)>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn after_write(r: crate::Result<()>) -> crate::Result<()> {
+        match FAULT.with(Cell::get) {
+            Fault::FailWrite => Err(crate::ProtocolError::TtcDecode("injected write fault")),
+            _ => r,
+        }
+    }
+
+    pub(crate) fn grow(frame: &mut Vec<u8>) {
+        if FAULT.with(Cell::get) == Fault::Grow {
+            frame.push(0x5a);
+        }
+    }
+
+    /// Records the wiped bytes (their length, and whether every byte is zero) before the clear.
+    pub(crate) fn observe(frame: &[u8]) {
+        SEEN.with(|s| *s.borrow_mut() = Some((frame.len(), frame.iter().all(|b| *b == 0))));
+    }
+}
+
+/// Zero every written byte, then clear the Vec zeroing its full capacity.
+fn wipe_frame(frame: &mut Vec<u8>) {
+    frame.as_mut_slice().zeroize();
+    #[cfg(test)]
+    frame_fault::observe(frame);
+    frame.zeroize();
+}
+
+#[cfg(test)]
+mod token_frame_tests {
+    use super::frame_fault::{Fault, FAULT, SEEN};
+    use super::*;
+
+    fn frame(fast: bool, token: &str, pop: Option<TokenPop<'_>>) -> Result<Vec<u8>> {
+        build_auth_phase_two_token_frame(
+            fast,
+            "",
+            token,
+            "busbar-store-oracle",
+            0x0400_1000,
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=h)(PORT=2484))(CONNECT_DATA=(SERVICE_NAME=S)))",
+            None,
+            pop,
+            None,
+        )
+    }
+
+    /// The caller-custody builders of the same frame (the upstream API).
+    fn reference(fast: bool, token: &str, pop: Option<TokenPop<'_>>) -> Vec<u8> {
+        let connect = "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=h)(PORT=2484))(CONNECT_DATA=(SERVICE_NAME=S)))";
+        if fast {
+            build_fast_auth_token_payload_with_pop_and_proxy(
+                "",
+                token,
+                "busbar-store-oracle",
+                0x0400_1000,
+                connect,
+                None,
+                pop,
+                None,
+            )
+            .unwrap()
+        } else {
+            build_auth_phase_two_token_payload_with_pop_and_proxy(
+                "",
+                token,
+                "busbar-store-oracle",
+                0x0400_1000,
+                connect,
+                None,
+                pop,
+                None,
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn every_token_frame_is_written_once_at_exact_capacity() {
+        let long = "t".repeat(70_000); // long-length chunks (32,767 per chunk)
+        let header = "date: Tue, 17 Nov 2026 08:49:37 GMT\n(request-target): S\nhost: h:2484";
+        let signature = "c2lnbmF0dXJl".repeat(30);
+        for fast in [false, true] {
+            for token in ["eyJ.short.token", long.as_str()] {
+                for pop in [
+                    None,
+                    Some(TokenPop {
+                        header,
+                        signature: &signature,
+                    }),
+                ] {
+                    let built = frame(fast, token, pop).unwrap();
+                    assert_eq!(
+                        built.capacity(),
+                        built.len(),
+                        "fast={fast} len={}",
+                        token.len()
+                    );
+                    assert_eq!(
+                        built,
+                        reference(fast, token, pop),
+                        "byte-identical to the upstream builders"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_unreachable_error_paths_wipe_the_frame_before_returning() {
+        for (fault, grown) in [(Fault::FailWrite, false), (Fault::Grow, true)] {
+            FAULT.with(|f| f.set(fault));
+            SEEN.with(|s| *s.borrow_mut() = None);
+            let err = frame(true, "secret-token-bytes", None).unwrap_err();
+            FAULT.with(|f| f.set(Fault::None));
+            assert!(matches!(err, ProtocolError::TtcDecode(_)), "{err:?}");
+            let (len, zero) = SEEN
+                .with(|s| *s.borrow())
+                .expect("the error path wiped the frame");
+            assert!(len > 0 && zero, "every written byte was zeroed (len {len})");
+            if grown {
+                let expected = frame(true, "secret-token-bytes", None).unwrap().len() + 1;
+                assert_eq!(len, expected);
+            }
+        }
+    }
 }

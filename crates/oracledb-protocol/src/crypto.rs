@@ -16,7 +16,7 @@
 //!
 //! Only the 12C verifier is accepted. The pre-12c combo key (MD5 over the key parts, taken when the
 //! server's session key part is 48 bytes) runs only on a provider that offers [`Provider::md5`];
-//! otherwise it is refused with [`ProtocolError::Md5ComboKeyRefused`] before anything else is
+//! otherwise it is refused with [`ProtocolError::LegacySessionKey`] before anything else is
 //! computed.
 
 use std::collections::BTreeMap;
@@ -40,14 +40,11 @@ pub trait Provider {
     /// A wiping, fixed-length secret buffer the provider owns (store-oracle: `SecureVec`, which is
     /// `DerefMut<Target = [u8]>`).
     type Secret: core::ops::DerefMut<Target = [u8]>;
-    /// The provider's error; its class (a refusal of the parameters, or a failure) survives into
-    /// [`ProtocolError::Crypto`].
-    type Error: Into<CryptoFailure>;
     /// A zero-filled secret of exactly `len` bytes.
-    fn secret(&self, len: usize) -> core::result::Result<Self::Secret, Self::Error>;
-    fn fill_random(&self, out: &mut [u8]) -> core::result::Result<(), Self::Error>;
+    fn secret(&self, len: usize) -> core::result::Result<Self::Secret, CryptoError>;
+    fn fill_random(&self, out: &mut [u8]) -> core::result::Result<(), CryptoError>;
     /// SHA-512 over the concatenation of `parts` (no caller-side concatenation buffer).
-    fn sha512(&self, parts: &[&[u8]]) -> core::result::Result<Self::Secret, Self::Error>;
+    fn sha512(&self, parts: &[&[u8]]) -> core::result::Result<Self::Secret, CryptoError>;
     /// RFC 8018 PBKDF2-HMAC-SHA512, `out_len` 1..=64.
     fn pbkdf2_hmac_sha512(
         &self,
@@ -55,45 +52,47 @@ pub trait Provider {
         salt: &[u8],
         iterations: u32,
         out_len: usize,
-    ) -> core::result::Result<Self::Secret, Self::Error>;
+    ) -> core::result::Result<Self::Secret, CryptoError>;
     /// Raw AES-CBC (no padding), data a non-zero multiple of 16. The ciphertext is public.
     fn aes_cbc_encrypt(
         &self,
         key: &[u8],
         iv: &[u8; 16],
         data: &[u8],
-    ) -> core::result::Result<Vec<u8>, Self::Error>;
+    ) -> core::result::Result<Vec<u8>, CryptoError>;
     /// The inverse of [`Provider::aes_cbc_encrypt`]; no padding is removed.
     fn aes_cbc_decrypt(
         &self,
         key: &[u8],
         iv: &[u8; 16],
         data: &[u8],
-    ) -> core::result::Result<Self::Secret, Self::Error>;
+    ) -> core::result::Result<Self::Secret, CryptoError>;
     /// Constant-time equality.
     fn ct_eq(&self, a: &[u8], b: &[u8]) -> bool;
     /// Legacy digest for the 11G verifier; `None` = not offered (the verifier is refused).
-    fn sha1(&self, _parts: &[&[u8]]) -> Option<core::result::Result<[u8; 20], Self::Error>> {
+    fn sha1(&self, _parts: &[&[u8]]) -> Option<core::result::Result<[u8; 20], CryptoError>> {
         None
     }
     /// Legacy digest for the 48-byte combo key; `None` = not offered (the branch is refused).
-    fn md5(&self, _data: &[u8]) -> Option<core::result::Result<[u8; 16], Self::Error>> {
+    fn md5(&self, _data: &[u8]) -> Option<core::result::Result<[u8; 16], CryptoError>> {
         None
     }
 }
 
-/// A provider error, class preserved: `unavailable` is a verdict (the provider's module refuses these
-/// parameters, for example a validated module's PBKDF2 policy), otherwise a malfunction. `reason` is
-/// static text with no key material in it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CryptoFailure {
-    pub unavailable: bool,
-    pub reason: &'static str,
+/// A provider error. The class survives the boundary: a refusal verdict (the module does not offer
+/// these parameters) vs a module failure. The reason is static text with no key material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CryptoError {
+    Unavailable(&'static str),
+    Failed(&'static str),
 }
 
 /// A provider answer as this crate's error.
-fn lift<P: Provider, T>(_p: &P, r: core::result::Result<T, P::Error>) -> Result<T> {
-    r.map_err(|e| ProtocolError::Crypto(e.into()))
+fn lift<P: Provider, T>(_p: &P, r: core::result::Result<T, CryptoError>) -> Result<T> {
+    r.map_err(|e| match e {
+        CryptoError::Unavailable(reason) => ProtocolError::CryptoUnavailable(reason),
+        CryptoError::Failed(reason) => ProtocolError::CryptoFailed(reason),
+    })
 }
 
 /// The phase-two verifier material. `combo_key` stays in the provider's secret custody.
@@ -108,7 +107,7 @@ pub struct EncryptedPassword<S> {
 /// The phase-two verifier material for `password` against the server's phase-one
 /// `session_data`, computed over `p`. Only [`TNS_VERIFIER_TYPE_12C`] is accepted: the 10G/11G
 /// verifiers need SHA-1 and AES-192 session keys, which this code does not offer.
-pub fn generate_verifier<P: Provider>(
+pub fn generate_verifier_with<P: Provider>(
     p: &P,
     password: &[u8],
     session_data: &BTreeMap<String, String>,
@@ -123,14 +122,10 @@ pub fn generate_verifier<P: Provider>(
     salt.extend_from_slice(b"AUTH_PBKDF2_SPEEDY_KEY");
     let password_key = lift(p, p.pbkdf2_hmac_sha512(password, &salt, iterations, 64))?;
     let digest = lift(p, p.sha512(&[password_key.as_ref(), &verifier_data]))?;
-    let password_hash =
-        digest
-            .as_ref()
-            .get(..KEY_LEN)
-            .ok_or(ProtocolError::Crypto(CryptoFailure {
-                unavailable: false,
-                reason: "SHA-512 answered short",
-            }))?;
+    let password_hash = digest
+        .as_ref()
+        .get(..KEY_LEN)
+        .ok_or(ProtocolError::CryptoFailed("SHA-512 answered short"))?;
 
     let encoded_server_key = decode_session_hex(session_data, "AUTH_SESSKEY")?;
     if encoded_server_key.is_empty() || !encoded_server_key.len().is_multiple_of(16) {
@@ -148,7 +143,7 @@ pub fn generate_verifier<P: Provider>(
     }
     let legacy = part_a.len() == LEGACY_SESSION_KEY_LEN;
     if legacy && p.md5(&[]).is_none() {
-        return Err(ProtocolError::Md5ComboKeyRefused);
+        return Err(ProtocolError::LegacySessionKey);
     }
     let mut part_b = lift(p, p.secret(part_a.len()))?;
     lift(p, p.fill_random(part_b.as_mut()))?;
@@ -213,14 +208,14 @@ pub fn generate_verifier<P: Provider>(
 fn md5<P: Provider>(p: &P, data: &[u8]) -> Result<[u8; 16]> {
     match p.md5(data) {
         Some(r) => lift(p, r),
-        None => Err(ProtocolError::Md5ComboKeyRefused),
+        None => Err(ProtocolError::LegacySessionKey),
     }
 }
 
 /// Encrypt the old/new password pair with the session combo key for the change-password call
 /// (reference messages/auth.pyx `_encrypt_passwords`: one shared random salt, AES-CBC under
 /// `_combo_key`, upper-hex encoding).
-pub fn encrypt_change_password_pair<P: Provider>(
+pub fn encrypt_change_password_pair_with<P: Provider>(
     p: &P,
     combo_key: &[u8],
     old_password: &[u8],
@@ -235,7 +230,7 @@ pub fn encrypt_change_password_pair<P: Provider>(
 
 /// Check the server's proof: `AUTH_SVR_RESPONSE` decrypts under the combo key to a block whose
 /// bytes 16..32 are `SERVER_TO_CLIENT` (compared with the provider's constant-time equality).
-pub fn verify_server_response<P: Provider>(
+pub fn verify_server_response_with<P: Provider>(
     p: &P,
     combo_key: &[u8],
     session_data: &BTreeMap<String, String>,
@@ -303,7 +298,10 @@ fn hex_upper_truncated(bytes: &[u8], chars: usize) -> String {
 }
 
 #[cfg(feature = "o5logon-rustcrypto")]
-pub use rustcrypto::{RustCryptoError, RustCryptoProvider, RustSecret};
+pub use rustcrypto::{
+    encrypt_change_password_pair, generate_verifier, verify_server_response, RustCryptoProvider,
+    SecretBytes,
+};
 
 #[cfg(feature = "o5logon-rustcrypto")]
 mod rustcrypto {
@@ -314,7 +312,10 @@ mod rustcrypto {
     use sha2::{Digest, Sha512};
     use zeroize::Zeroize;
 
-    use super::{CryptoFailure, Provider};
+    use std::collections::BTreeMap;
+
+    use super::{CryptoError, EncryptedPassword, Provider};
+    use crate::Result;
 
     /// [`Provider`] over the RustCrypto crates (`pbkdf2`, `sha2`, `aes`) and the OS RNG. It offers
     /// neither SHA-1 nor MD5, so the 11G verifier and the 48-byte combo key are refused.
@@ -323,87 +324,74 @@ mod rustcrypto {
 
     /// A secret buffer wiped on drop.
     #[derive(Clone, Default, PartialEq, Eq)]
-    pub struct RustSecret(Vec<u8>);
+    pub struct SecretBytes(Vec<u8>);
 
-    impl Drop for RustSecret {
+    impl From<Vec<u8>> for SecretBytes {
+        fn from(bytes: Vec<u8>) -> Self {
+            Self(bytes)
+        }
+    }
+
+    impl Drop for SecretBytes {
         fn drop(&mut self) {
             self.0.zeroize();
         }
     }
 
-    impl core::fmt::Debug for RustSecret {
+    impl core::fmt::Debug for SecretBytes {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.write_str("RustSecret(..)")
+            f.write_str("SecretBytes(..)")
         }
     }
 
-    impl core::ops::Deref for RustSecret {
+    impl core::ops::Deref for SecretBytes {
         type Target = [u8];
         fn deref(&self) -> &[u8] {
             &self.0
         }
     }
 
-    impl core::ops::DerefMut for RustSecret {
+    impl core::ops::DerefMut for SecretBytes {
         fn deref_mut(&mut self) -> &mut [u8] {
             &mut self.0
         }
     }
 
-    /// Why [`RustCryptoProvider`] failed.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub struct RustCryptoError(pub &'static str);
+    // RustCrypto never refuses as a policy: every error is `CryptoError::Failed`.
 
-    /// RustCrypto never refuses as a policy: every error is a failure or a malformed input.
-    impl From<RustCryptoError> for CryptoFailure {
-        fn from(e: RustCryptoError) -> Self {
-            CryptoFailure {
-                unavailable: false,
-                reason: e.0,
-            }
-        }
-    }
-
-    impl core::fmt::Display for RustCryptoError {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.write_str(self.0)
-        }
-    }
-
-    fn aligned(data: &[u8]) -> Result<(), RustCryptoError> {
+    fn aligned(data: &[u8]) -> core::result::Result<(), CryptoError> {
         if data.is_empty() || !data.len().is_multiple_of(16) {
-            return Err(RustCryptoError(
+            return Err(CryptoError::Failed(
                 "AES-CBC data is not a non-empty multiple of 16 bytes",
             ));
         }
         Ok(())
     }
 
-    fn cipher(key: &[u8]) -> Result<Aes256, RustCryptoError> {
-        Aes256::new_from_slice(key).map_err(|_| RustCryptoError("invalid AES key length"))
+    fn cipher(key: &[u8]) -> core::result::Result<Aes256, CryptoError> {
+        Aes256::new_from_slice(key).map_err(|_| CryptoError::Failed("invalid AES key length"))
     }
 
     impl Provider for RustCryptoProvider {
-        type Secret = RustSecret;
-        type Error = RustCryptoError;
+        type Secret = SecretBytes;
 
-        fn secret(&self, len: usize) -> Result<RustSecret, RustCryptoError> {
-            Ok(RustSecret(vec![0; len]))
+        fn secret(&self, len: usize) -> core::result::Result<SecretBytes, CryptoError> {
+            Ok(SecretBytes(vec![0; len]))
         }
 
-        fn fill_random(&self, out: &mut [u8]) -> Result<(), RustCryptoError> {
+        fn fill_random(&self, out: &mut [u8]) -> core::result::Result<(), CryptoError> {
             OsRng
                 .try_fill_bytes(out)
-                .map_err(|_| RustCryptoError("the OS random source failed"))
+                .map_err(|_| CryptoError::Failed("the OS random source failed"))
         }
 
-        fn sha512(&self, parts: &[&[u8]]) -> Result<RustSecret, RustCryptoError> {
+        fn sha512(&self, parts: &[&[u8]]) -> core::result::Result<SecretBytes, CryptoError> {
             let mut hasher = Sha512::new();
             for part in parts {
                 hasher.update(part);
             }
             let mut digest = hasher.finalize();
-            let out = RustSecret(digest.to_vec());
+            let out = SecretBytes(digest.to_vec());
             digest.as_mut_slice().zeroize();
             Ok(out)
         }
@@ -414,13 +402,13 @@ mod rustcrypto {
             salt: &[u8],
             iterations: u32,
             out_len: usize,
-        ) -> Result<RustSecret, RustCryptoError> {
+        ) -> core::result::Result<SecretBytes, CryptoError> {
             if iterations == 0 || out_len == 0 || out_len > 64 {
-                return Err(RustCryptoError(
+                return Err(CryptoError::Failed(
                     "PBKDF2-HMAC-SHA512 parameters out of range",
                 ));
             }
-            let mut out = RustSecret(vec![0; out_len]);
+            let mut out = SecretBytes(vec![0; out_len]);
             pbkdf2::pbkdf2_hmac::<Sha512>(password, salt, iterations, &mut out.0);
             Ok(out)
         }
@@ -430,7 +418,7 @@ mod rustcrypto {
             key: &[u8],
             iv: &[u8; 16],
             data: &[u8],
-        ) -> Result<Vec<u8>, RustCryptoError> {
+        ) -> core::result::Result<Vec<u8>, CryptoError> {
             aligned(data)?;
             let cipher = cipher(key)?;
             let mut out = data.to_vec();
@@ -451,10 +439,10 @@ mod rustcrypto {
             key: &[u8],
             iv: &[u8; 16],
             data: &[u8],
-        ) -> Result<RustSecret, RustCryptoError> {
+        ) -> core::result::Result<SecretBytes, CryptoError> {
             aligned(data)?;
             let cipher = cipher(key)?;
-            let mut out = RustSecret(data.to_vec());
+            let mut out = SecretBytes(data.to_vec());
             let mut previous = *iv;
             for block in out.0.chunks_mut(16) {
                 let mut current = [0u8; 16];
@@ -472,6 +460,37 @@ mod rustcrypto {
         fn ct_eq(&self, a: &[u8], b: &[u8]) -> bool {
             a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
         }
+    }
+
+    /// [`super::generate_verifier_with`] over [`RustCryptoProvider`] (the upstream name).
+    pub fn generate_verifier(
+        password: &[u8],
+        session_data: &BTreeMap<String, String>,
+        verifier_type: u32,
+    ) -> Result<EncryptedPassword<SecretBytes>> {
+        super::generate_verifier_with(&RustCryptoProvider, password, session_data, verifier_type)
+    }
+
+    /// [`super::verify_server_response_with`] over [`RustCryptoProvider`] (the upstream name).
+    pub fn verify_server_response(
+        combo_key: &[u8],
+        session_data: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        super::verify_server_response_with(&RustCryptoProvider, combo_key, session_data)
+    }
+
+    /// [`super::encrypt_change_password_pair_with`] over [`RustCryptoProvider`] (the upstream name).
+    pub fn encrypt_change_password_pair(
+        combo_key: &[u8],
+        old_password: &[u8],
+        new_password: &[u8],
+    ) -> Result<(String, String)> {
+        super::encrypt_change_password_pair_with(
+            &RustCryptoProvider,
+            combo_key,
+            old_password,
+            new_password,
+        )
     }
 }
 
@@ -498,16 +517,15 @@ mod tests {
     }
 
     impl Provider for Counting {
-        type Secret = RustSecret;
-        type Error = RustCryptoError;
-        fn secret(&self, len: usize) -> core::result::Result<RustSecret, RustCryptoError> {
+        type Secret = SecretBytes;
+        fn secret(&self, len: usize) -> core::result::Result<SecretBytes, CryptoError> {
             P.secret(len)
         }
-        fn fill_random(&self, out: &mut [u8]) -> core::result::Result<(), RustCryptoError> {
+        fn fill_random(&self, out: &mut [u8]) -> core::result::Result<(), CryptoError> {
             self.random.set(self.random.get() + 1);
             P.fill_random(out)
         }
-        fn sha512(&self, parts: &[&[u8]]) -> core::result::Result<RustSecret, RustCryptoError> {
+        fn sha512(&self, parts: &[&[u8]]) -> core::result::Result<SecretBytes, CryptoError> {
             P.sha512(parts)
         }
         fn pbkdf2_hmac_sha512(
@@ -516,7 +534,7 @@ mod tests {
             salt: &[u8],
             iterations: u32,
             out_len: usize,
-        ) -> core::result::Result<RustSecret, RustCryptoError> {
+        ) -> core::result::Result<SecretBytes, CryptoError> {
             P.pbkdf2_hmac_sha512(password, salt, iterations, out_len)
         }
         fn aes_cbc_encrypt(
@@ -524,7 +542,7 @@ mod tests {
             key: &[u8],
             iv: &[u8; 16],
             data: &[u8],
-        ) -> core::result::Result<Vec<u8>, RustCryptoError> {
+        ) -> core::result::Result<Vec<u8>, CryptoError> {
             P.aes_cbc_encrypt(key, iv, data)
         }
         fn aes_cbc_decrypt(
@@ -532,14 +550,15 @@ mod tests {
             key: &[u8],
             iv: &[u8; 16],
             data: &[u8],
-        ) -> core::result::Result<RustSecret, RustCryptoError> {
+        ) -> core::result::Result<SecretBytes, CryptoError> {
             P.aes_cbc_decrypt(key, iv, data)
         }
         fn ct_eq(&self, a: &[u8], b: &[u8]) -> bool {
             P.ct_eq(a, b)
         }
-        fn md5(&self, _: &[u8]) -> Option<core::result::Result<[u8; 16], RustCryptoError>> {
-            self.offers_md5.then_some(Err(RustCryptoError("MD5 stub")))
+        fn md5(&self, _: &[u8]) -> Option<core::result::Result<[u8; 16], CryptoError>> {
+            self.offers_md5
+                .then_some(Err(CryptoError::Failed("MD5 stub")))
         }
     }
 
@@ -672,7 +691,8 @@ mod tests {
         let password = b"a-correct-password";
         let server = Server::new(password, 32);
         let encrypted =
-            generate_verifier(&P, password, &server.session_data, TNS_VERIFIER_TYPE_12C).unwrap();
+            generate_verifier_with(&P, password, &server.session_data, TNS_VERIFIER_TYPE_12C)
+                .unwrap();
         assert_eq!(encrypted.session_key.len(), 64);
         let combo = server.combo_key(&encrypted.session_key);
         assert_eq!(
@@ -697,14 +717,14 @@ mod tests {
         let mut answer = BTreeMap::new();
         let sealed = P.aes_cbc_encrypt(&combo, &ZERO_IV, &proof).unwrap();
         answer.insert("AUTH_SVR_RESPONSE".to_string(), hex_upper(&sealed));
-        verify_server_response(&P, &combo, &answer).unwrap();
+        verify_server_response_with(&P, &combo, &answer).unwrap();
         let forged = P.aes_cbc_encrypt(&[9u8; 32], &ZERO_IV, &proof).unwrap();
         answer.insert("AUTH_SVR_RESPONSE".to_string(), hex_upper(&forged));
         assert!(matches!(
-            verify_server_response(&P, &combo, &answer),
+            verify_server_response_with(&P, &combo, &answer),
             Err(ProtocolError::InvalidServerResponse)
         ));
-        let (old, new) = encrypt_change_password_pair(&P, &combo, b"old", b"new").unwrap();
+        let (old, new) = encrypt_change_password_pair_with(&P, &combo, b"old", b"new").unwrap();
         assert_eq!((old.len(), new.len()), (64, 64));
     }
 
@@ -712,10 +732,11 @@ mod tests {
     fn the_md5_session_key_is_refused_before_any_key_is_drawn() {
         let server = Server::new(b"pw", 48);
         let crypto = Counting::default();
-        let err = generate_verifier(&crypto, b"pw", &server.session_data, TNS_VERIFIER_TYPE_12C)
-            .expect_err("a 48-byte session key part must be refused");
+        let err =
+            generate_verifier_with(&crypto, b"pw", &server.session_data, TNS_VERIFIER_TYPE_12C)
+                .expect_err("a 48-byte session key part must be refused");
         assert!(
-            matches!(err, ProtocolError::Md5ComboKeyRefused),
+            matches!(err, ProtocolError::LegacySessionKey),
             "got {err:?}"
         );
         assert!(err.to_string().contains("MD5"));
@@ -725,7 +746,7 @@ mod tests {
             offers_md5: true,
             ..Counting::default()
         };
-        let err = generate_verifier(
+        let err = generate_verifier_with(
             &offering,
             b"pw",
             &server.session_data,
@@ -733,13 +754,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(
-                err,
-                ProtocolError::Crypto(CryptoFailure {
-                    unavailable: false,
-                    reason: "MD5 stub"
-                })
-            ),
+            matches!(err, ProtocolError::CryptoFailed("MD5 stub")),
             "got {err:?}"
         );
     }
@@ -751,7 +766,7 @@ mod tests {
             if let Some(v) = value {
                 session_data.insert("AUTH_VFR_DATA".to_string(), v.to_string());
             }
-            let err = generate_verifier(&P, b"password", &session_data, TNS_VERIFIER_TYPE_12C)
+            let err = generate_verifier_with(&P, b"password", &session_data, TNS_VERIFIER_TYPE_12C)
                 .expect_err("a bad AUTH_VFR_DATA must be rejected");
             assert!(
                 matches!(
@@ -774,7 +789,7 @@ mod tests {
             crate::thin::TNS_VERIFIER_TYPE_11G_1,
             crate::thin::TNS_VERIFIER_TYPE_11G_2,
         ] {
-            let err = generate_verifier(&P, b"password", &session_data, verifier_type)
+            let err = generate_verifier_with(&P, b"password", &session_data, verifier_type)
                 .expect_err("only the 12C verifier is accepted");
             assert!(
                 matches!(err, ProtocolError::UnsupportedVerifier { verifier_type: v } if v == verifier_type),
@@ -787,13 +802,13 @@ mod tests {
     fn verify_server_response_rejects_missing_or_malformed_responses() {
         let mut session_data = BTreeMap::new();
         assert!(matches!(
-            verify_server_response(&P, &[0u8; 32], &session_data),
+            verify_server_response_with(&P, &[0u8; 32], &session_data),
             Err(ProtocolError::InvalidServerResponse)
         ));
         for bad in ["zz-not-hex".to_string(), "00".to_string(), "00".repeat(17)] {
             session_data.insert("AUTH_SVR_RESPONSE".to_string(), bad);
             assert!(matches!(
-                verify_server_response(&P, &[0u8; 32], &session_data),
+                verify_server_response_with(&P, &[0u8; 32], &session_data),
                 Err(ProtocolError::InvalidServerResponse)
             ));
         }
@@ -803,7 +818,7 @@ mod tests {
             .unwrap();
         session_data.insert("AUTH_SVR_RESPONSE".to_string(), hex_upper(&ciphertext));
         assert!(matches!(
-            verify_server_response(&P, &combo_key, &session_data),
+            verify_server_response_with(&P, &combo_key, &session_data),
             Err(ProtocolError::InvalidServerResponse)
         ));
     }
@@ -811,6 +826,6 @@ mod tests {
     #[test]
     fn a_secret_is_wiped_when_dropped_and_never_printed() {
         let s = P.pbkdf2_hmac_sha512(b"pw", b"salt", 1, 32).unwrap();
-        assert_eq!(format!("{s:?}"), "RustSecret(..)");
+        assert_eq!(format!("{s:?}"), "SecretBytes(..)");
     }
 }

@@ -99,11 +99,14 @@ pub enum ProtocolError {
         "pre-12c O5LOGON session key refused (its combo key is MD5); give the user a 12C \
          password verifier"
     )]
-    Md5ComboKeyRefused,
-    /// The caller's [`crypto::Provider`] refused (`unavailable`) or failed; the reason is the
-    /// provider's static text and never carries key material.
-    #[error("crypto provider: {}", .0.reason)]
-    Crypto(crypto::CryptoFailure),
+    LegacySessionKey,
+    /// The caller's [`crypto::Provider`] does not offer the operation with these parameters (a
+    /// validated module's policy): a verdict, not a malfunction. Static text, no key material.
+    #[error("the crypto provider does not offer this: {0}")]
+    CryptoUnavailable(&'static str),
+    /// The caller's [`crypto::Provider`] failed. Static text, no key material.
+    #[error("the crypto provider failed: {0}")]
+    CryptoFailed(&'static str),
     // The next three mirror python-oracledb error numbers DPY-8000, DPY-8001
     // and DPY-4041 so a Python-facing layer can map them one-to-one.
     // "exeeds" reproduces the reference's spelling (errors.py ERR_VALUE_TOO_LARGE).
@@ -156,6 +159,11 @@ impl ProtocolError {
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
+
+/// The IMF-fixdate (RFC 9110 §5.6.7) of a unix time, e.g. `Sun, 06 Nov 1994 08:49:37 GMT`.
+pub fn httpdate_of(unix_secs: u64) -> String {
+    httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs))
+}
 
 /// Structured server error information parsed from the TTC error trailer
 /// (reference impl/thin/messages/base.pyx `_process_error_info`).

@@ -1671,6 +1671,7 @@ dependencies = [
  "des",
  "hex",
  "hmac 0.12.1",
+ "httpdate",
  "pbkdf2",
  "pkcs8",
  "proptest",

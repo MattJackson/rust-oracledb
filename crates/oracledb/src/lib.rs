@@ -2734,7 +2734,7 @@ pub struct Connection {
     user: String,
     /// Session combo key from verifier generation, retained for the
     /// change-password call (reference keeps `conn_impl._combo_key`).
-    combo_key: Vec<u8>,
+    combo_key: oracledb_protocol::crypto::SecretBytes,
     /// LRU statement cache: SQL text -> open server cursor id plus the bind
     /// TYPE shape the cursor was last bound with (reference
     /// thin/statement_cache.pyx, default size 20). The shape guards against
@@ -3435,7 +3435,11 @@ impl Connection {
                 };
                 // Token auth derives no shared password key: there is no combo key,
                 // hence no server-response MAC to verify and no change-password.
-                (auth, capabilities, Vec::new())
+                (
+                    auth,
+                    capabilities,
+                    oracledb_protocol::crypto::SecretBytes::default(),
+                )
             } else {
                 let client_pid = process::id();
                 // Pre-23ai servers do not understand the combined fast-auth
@@ -3504,7 +3508,6 @@ impl Connection {
                     .verifier_type
                     .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
                 let encrypted = oracledb_protocol::crypto::generate_verifier(
-                    &oracledb_protocol::crypto::RustCryptoProvider,
                     options.password.as_bytes(),
                     &auth_one.session_data,
                     verifier_type,
@@ -3534,15 +3537,10 @@ impl Connection {
                 let auth_two =
                     parse_auth_response_with_limits(&auth_two_response, protocol_limits)?;
                 oracledb_protocol::crypto::verify_server_response(
-                    &oracledb_protocol::crypto::RustCryptoProvider,
-                    encrypted.combo_key.as_ref(),
+                    &encrypted.combo_key,
                     &auth_two.session_data,
                 )?;
-                (
-                    auth_two,
-                    capabilities,
-                    encrypted.combo_key.as_ref().to_vec(),
-                )
+                (auth_two, capabilities, encrypted.combo_key)
             };
 
             let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
@@ -3764,7 +3762,6 @@ impl Connection {
         self.ensure_clean_before_request().await?;
         let (encoded_password, encoded_newpassword) =
             oracledb_protocol::crypto::encrypt_change_password_pair(
-                &oracledb_protocol::crypto::RustCryptoProvider,
                 &self.combo_key,
                 old_password.as_bytes(),
                 new_password.as_bytes(),
@@ -12488,7 +12485,7 @@ mod tests {
             shape_cache: Arc::new(StatementShapeCache::new()),
             dead: false,
             user: "test_user".into(),
-            combo_key: Vec::new(),
+            combo_key: oracledb_protocol::crypto::SecretBytes::default(),
             statement_cache: Vec::new(),
             statement_cache_size: STATEMENT_CACHE_SIZE,
             in_use_cursors: HashSet::new(),
@@ -14311,7 +14308,7 @@ mod tests {
             session_key: "00".repeat(32),
             speedy_key: None,
             password: "00".repeat(32),
-            combo_key: vec![0u8; 32],
+            combo_key: oracledb_protocol::crypto::SecretBytes::from(vec![0u8; 32]),
         };
         let payload = build_auth_phase_two_payload_with_proxy_with_seq(
             "",
@@ -18060,7 +18057,7 @@ mod tests {
             let stream = TcpStream::connect(addr).await?;
             let (read, write) = transport::plain_split(stream);
             let mut connection = loopback_connection(read, write);
-            connection.combo_key = vec![0x11; 32];
+            connection.combo_key = oracledb_protocol::crypto::SecretBytes::from(vec![0x11; 32]);
 
             {
                 let mut change_password =
@@ -18132,7 +18129,7 @@ mod tests {
             let stream = TcpStream::connect(addr).await?;
             let (read, write) = transport::plain_split(stream);
             let mut connection = loopback_connection(read, write);
-            connection.combo_key = vec![0x11; 32];
+            connection.combo_key = oracledb_protocol::crypto::SecretBytes::from(vec![0x11; 32]);
 
             connection
                 .change_password(

@@ -210,7 +210,7 @@ pub(crate) fn write_auth_phase_two_token(
     Ok(())
 }
 
-pub fn build_auth_phase_two_payload<S>(
+pub fn build_auth_phase_two_payload<S: core::ops::Deref<Target = [u8]>>(
     user: &str,
     encrypted: &crate::crypto::EncryptedPassword<S>,
     driver_name: &str,
@@ -227,7 +227,7 @@ pub fn build_auth_phase_two_payload<S>(
     )
 }
 
-pub fn build_auth_phase_two_payload_with_seq<S>(
+pub fn build_auth_phase_two_payload_with_seq<S: core::ops::Deref<Target = [u8]>>(
     user: &str,
     encrypted: &crate::crypto::EncryptedPassword<S>,
     driver_name: &str,
@@ -246,7 +246,7 @@ pub fn build_auth_phase_two_payload_with_seq<S>(
     )
 }
 
-pub fn build_auth_phase_two_payload_with_context_with_seq<S>(
+pub fn build_auth_phase_two_payload_with_context_with_seq<S: core::ops::Deref<Target = [u8]>>(
     user: &str,
     encrypted: &crate::crypto::EncryptedPassword<S>,
     driver_name: &str,
@@ -279,7 +279,7 @@ pub fn build_auth_phase_two_payload_with_context_with_seq<S>(
 /// stray byte as part of the auth header and breaks the connection with a
 /// MARKER (observed live against Oracle XE 18c).
 #[allow(clippy::too_many_arguments)]
-pub fn build_auth_phase_two_payload_with_proxy_with_seq<S>(
+pub fn build_auth_phase_two_payload_with_proxy_with_seq<S: core::ops::Deref<Target = [u8]>>(
     user: &str,
     encrypted: &crate::crypto::EncryptedPassword<S>,
     driver_name: &str,

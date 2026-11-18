@@ -26,7 +26,7 @@ exclude = [
 # leave the dependency graph instead of being merely unreachable.
 default = ["o5logon-rustcrypto", "wallet"]
 # `crypto::RustCryptoProvider`: PBKDF2-HMAC-SHA512, SHA-512, AES-256-CBC and OsRng for O5LOGON.
-o5logon-rustcrypto = ["dep:aes", "dep:pbkdf2", "dep:rand", "dep:sha2", "dep:zeroize"]
+o5logon-rustcrypto = ["dep:aes", "dep:pbkdf2", "dep:rand", "dep:sha2"]
 # The Oracle wallet readers (`tls::wallet`, `tls::sso`): ASN.1 plus PKCS#12 / PKCS#8 / SSO
 # decryption (AES-CBC, 3DES-CBC, HMAC-SHA1/SHA256, PBKDF2, the SHA-1 PKCS#12 KDF).
 wallet = [
@@ -80,8 +80,10 @@ hmac = { workspace = true, optional = true }
 # inside the crate; we only call its safe `basic::from_utf8` API, so this crate
 # stays `#![forbid(unsafe_code)]`-clean.
 simdutf8 = { version = "0.1.5", optional = true }
-# Wipes RustSecret (the RustCryptoProvider secret buffer) on drop.
-zeroize = { version = "1", optional = true }
+# Wipes TtcWriter growth and drop (credential-carrying frames) and SecretBytes.
+zeroize = "1"
+# IMF-fixdate for the OCI IAM proof-of-possession header (`httpdate_of`). Pure formatting, no crypto.
+httpdate.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

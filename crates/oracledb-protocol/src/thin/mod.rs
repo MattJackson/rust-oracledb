@@ -24,6 +24,7 @@ mod dbobject;
 mod errors;
 mod execute;
 mod fetch;
+pub mod iam_pop;
 mod lob;
 mod number;
 mod sessionless;
