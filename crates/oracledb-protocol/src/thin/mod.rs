@@ -29,6 +29,7 @@ mod lob;
 mod number;
 mod sessionless;
 mod subscr;
+mod tcps_auth;
 mod types;
 // Centralized TTC field-version gates (the "version surface"): one named
 // predicate per version decision, reached for instead of a raw literal.
@@ -53,6 +54,7 @@ pub use lob::*;
 pub use number::*;
 pub use sessionless::*;
 pub use subscr::*;
+pub use tcps_auth::*;
 pub use types::*;
 // `errors` holds only crate-internal items (ServerErrorInfo + parse/skip helpers);
 // re-export at crate visibility so the glob has something to re-export.

@@ -12,6 +12,24 @@ pub fn connect_data_fits_inline(connect_data: &str) -> bool {
 }
 
 pub fn build_connect_packet_payload(connect_data: &str, sdu: u16) -> Result<Vec<u8>> {
+    connect_packet_payload(
+        connect_data,
+        sdu,
+        TNS_NSI_SUPPORT_SECURITY_RENEG | TNS_NSI_DISABLE_NA,
+    )
+}
+
+/// The CONNECT payload for a TCPS-authenticated session (`authentication_services=(TCPS)`): identical
+/// to [`build_connect_packet_payload`] except that network authentication (NA) is left enabled, so the
+/// listener expects the network-services negotiation
+/// ([`super::build_network_services_tcps_auth`]) right after ACCEPT. Reference messages/connect.pyx
+/// `ConnectMessage.send`: `TNS_NSI_NA_DISABLED` is set unless `externalauth` on a `tcps` address
+/// with a client wallet.
+pub fn build_connect_packet_payload_tcps_auth(connect_data: &str, sdu: u16) -> Result<Vec<u8>> {
+    connect_packet_payload(connect_data, sdu, TNS_NSI_SUPPORT_SECURITY_RENEG)
+}
+
+fn connect_packet_payload(connect_data: &str, sdu: u16, nsi_flags: u8) -> Result<Vec<u8>> {
     let connect_bytes = connect_data.as_bytes();
     let connect_len =
         u16::try_from(connect_bytes.len()).map_err(|_| ProtocolError::PacketTooLarge {
@@ -30,7 +48,6 @@ pub fn build_connect_packet_payload(connect_data: &str, sdu: u16) -> Result<Vec<
     writer.write_u16be(connect_len);
     writer.write_u16be(74);
     writer.write_u32be(0);
-    let nsi_flags = TNS_NSI_SUPPORT_SECURITY_RENEG | TNS_NSI_DISABLE_NA;
     writer.write_u8(nsi_flags);
     writer.write_u8(nsi_flags);
     writer.write_u64be(0);
