@@ -12,13 +12,19 @@
 //! * [`wallet`] — `ewallet.pem` / `ewallet.p12` readers and wallet-location
 //!   resolution (including encrypted-PKCS#8 private-key decryption).
 //! * [`sso`] — `cwallet.sso` (auto-login wallet) reader.
+//!
+//! The wallet readers decrypt with RustCrypto, so they exist only with the `wallet` feature
+//! (default-on).
 
 #![forbid(unsafe_code)]
 
 pub mod dn;
+#[cfg(feature = "wallet")]
 mod pfx;
 pub mod sni;
+#[cfg(feature = "wallet")]
 pub mod sso;
+#[cfg(feature = "wallet")]
 pub mod wallet;
 
 // The TLS helpers live in their submodules (`dn`, `sni`, `sso`, `wallet`), which

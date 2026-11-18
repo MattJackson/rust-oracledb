@@ -92,6 +92,22 @@ pub enum ProtocolError {
     InvalidAesKey,
     #[error("invalid server authentication response")]
     InvalidServerResponse,
+    /// The server steered O5LOGON onto the pre-12c session key: a 48-byte `AUTH_SESSKEY`
+    /// whose combo key is MD5 over the key parts. A 12c verifier never sends one, so this is a
+    /// downgrade or a misconfigured server, and it is refused before any digest is computed.
+    #[error(
+        "pre-12c O5LOGON session key refused (its combo key is MD5); give the user a 12C \
+         password verifier"
+    )]
+    LegacySessionKey,
+    /// The caller's [`crypto::O5Crypto`] refused the parameters of `operation` (for example a
+    /// validated module whose PBKDF2 policy does not admit the server's iteration count). A
+    /// verdict, not a malfunction.
+    #[error("the crypto provider does not offer {operation} with these parameters")]
+    CryptoUnavailable { operation: &'static str },
+    /// The caller's [`crypto::O5Crypto`] failed (`operation` names the primitive).
+    #[error("the crypto provider failed during {operation}")]
+    CryptoFailed { operation: &'static str },
     // The next three mirror python-oracledb error numbers DPY-8000, DPY-8001
     // and DPY-4041 so a Python-facing layer can map them one-to-one.
     // "exeeds" reproduces the reference's spelling (errors.py ERR_VALUE_TOO_LARGE).

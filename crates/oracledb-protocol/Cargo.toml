@@ -20,7 +20,27 @@ exclude = [
 ]
 
 [features]
-default = []
+# Both RustCrypto users are default-on, so the driver crate and every existing caller build as before.
+# A consumer that supplies its own crypto (an embedder whose host owns a validated module) turns the
+# defaults off: O5LOGON then runs on its `crypto::O5Crypto` implementation and the RustCrypto crates
+# leave the dependency graph instead of being merely unreachable.
+default = ["o5logon-rustcrypto", "wallet"]
+# `crypto::RustCrypto`: PBKDF2-HMAC-SHA512, SHA-512, AES-256-CBC and OsRng for O5LOGON, plus the
+# provider-less `generate_verifier`, `verify_server_response` and `encrypt_change_password_pair`.
+o5logon-rustcrypto = ["dep:aes", "dep:pbkdf2", "dep:rand", "dep:sha2"]
+# The Oracle wallet readers (`tls::wallet`, `tls::sso`): ASN.1 plus PKCS#12 / PKCS#8 / SSO
+# decryption (AES-CBC, 3DES-CBC, HMAC-SHA1/SHA256, PBKDF2, the SHA-1 PKCS#12 KDF).
+wallet = [
+    "dep:aes",
+    "dep:cbc",
+    "dep:der",
+    "dep:des",
+    "dep:hmac",
+    "dep:pbkdf2",
+    "dep:rustls-pki-types",
+    "dep:sha1",
+    "dep:sha2",
+]
 # Historical gate for the cwallet.sso (SSO auto-login wallet) reader. As of
 # 0.7.x the wallet readers (ewallet.pem incl. encrypted keys, ewallet.p12,
 # cwallet.sso) are first-class and always compiled; this feature is kept as an
@@ -39,24 +59,23 @@ cassette = []
 simd-decode = ["dep:simdutf8"]
 
 [dependencies]
-aes.workspace = true
+aes = { workspace = true, optional = true }
 hex.workspace = true
-md-5.workspace = true
-pbkdf2.workspace = true
-rand.workspace = true
-rustls-pki-types = { workspace = true, features = ["std"] }
+pbkdf2 = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, features = ["std"], optional = true }
 serde.workspace = true
-sha1.workspace = true
-sha2.workspace = true
+sha1 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 thiserror.workspace = true
 # Wallet readers (PKCS#12 `ewallet.p12`, encrypted-PKCS#8 `ewallet.pem`,
 # `cwallet.sso`): sans-I/O ASN.1 + symmetric crypto, all RustCrypto
 # (`#![forbid(unsafe_code)]`-clean). The `pem` feature of `der` supplies the
 # RFC 7468 decoder for the ENCRYPTED PRIVATE KEY PEM block.
-cbc.workspace = true
-des.workspace = true
-der = { workspace = true, features = ["pem"] }
-hmac.workspace = true
+cbc = { workspace = true, optional = true }
+des = { workspace = true, optional = true }
+der = { workspace = true, features = ["pem"], optional = true }
+hmac = { workspace = true, optional = true }
 # SIMD-accelerated UTF-8 validation for the borrowed fetch text path (gated by
 # the `simd-decode` feature). Its `unsafe` SIMD intrinsics are encapsulated
 # inside the crate; we only call its safe `basic::from_utf8` API, so this crate
@@ -91,3 +110,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "tls_wallet"
+required-features = ["wallet"]
