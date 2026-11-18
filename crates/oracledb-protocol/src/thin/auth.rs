@@ -120,6 +120,35 @@ pub fn append_auth_phase_two_token_with_pop_and_proxy(
     proxy_user: Option<&str>,
 ) -> Result<()> {
     let mut writer = TtcWriter::new();
+    write_auth_phase_two_token(
+        &mut writer,
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+        pop,
+        proxy_user,
+    )?;
+    out.extend_from_slice(&writer.into_bytes());
+    Ok(())
+}
+
+/// The token phase-two message written onto `writer` (the body of
+/// [`append_auth_phase_two_token_with_pop_and_proxy`]).
+#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
+pub(crate) fn write_auth_phase_two_token(
+    writer: &mut TtcWriter,
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    edition: Option<&str>,
+    pop: Option<TokenPop<'_>>,
+    proxy_user: Option<&str>,
+) -> Result<()> {
     writer.write_function_code(TNS_FUNC_AUTH_PHASE_TWO);
     // AUTH_TOKEN + the four mandatory session pairs, plus the optional
     // PROXY_CLIENT_NAME, AUTH_HEADER/AUTH_SIGNATURE (IAM proof-of-possession),
@@ -141,22 +170,22 @@ pub fn append_auth_phase_two_token_with_pop_and_proxy(
     if !connect_string.is_empty() {
         num_pairs += 1;
     }
-    write_auth_header(&mut writer, user, auth_mode, num_pairs)?;
+    write_auth_header(writer, user, auth_mode, num_pairs)?;
     // Reference order: PROXY_CLIENT_NAME before AUTH_TOKEN when proxying.
     if let Some(proxy_user) = proxy_user {
-        write_key_value(&mut writer, "PROXY_CLIENT_NAME", proxy_user, 0)?;
+        write_key_value(writer, "PROXY_CLIENT_NAME", proxy_user, 0)?;
     }
-    write_key_value(&mut writer, "AUTH_TOKEN", token, 0)?;
-    write_key_value(&mut writer, "SESSION_CLIENT_CHARSET", "873", 0)?;
-    write_key_value(&mut writer, "SESSION_CLIENT_DRIVER_NAME", driver_name, 0)?;
+    write_key_value(writer, "AUTH_TOKEN", token, 0)?;
+    write_key_value(writer, "SESSION_CLIENT_CHARSET", "873", 0)?;
+    write_key_value(writer, "SESSION_CLIENT_DRIVER_NAME", driver_name, 0)?;
     write_key_value(
-        &mut writer,
+        writer,
         "SESSION_CLIENT_VERSION",
         &version_num.to_string(),
         0,
     )?;
     write_key_value(
-        &mut writer,
+        writer,
         "AUTH_ALTER_SESSION",
         "ALTER SESSION SET TIME_ZONE='+00:00'\0",
         1,
@@ -165,26 +194,25 @@ pub fn append_auth_phase_two_token_with_pop_and_proxy(
     // (after AUTH_ALTER_SESSION, before AUTH_ORA_EDITION): the server verifies
     // AUTH_SIGNATURE over AUTH_HEADER using the public key embedded in the token.
     if let Some(pop) = pop {
-        write_key_value(&mut writer, "AUTH_HEADER", pop.header, 0)?;
-        write_key_value(&mut writer, "AUTH_SIGNATURE", pop.signature, 0)?;
+        write_key_value(writer, "AUTH_HEADER", pop.header, 0)?;
+        write_key_value(writer, "AUTH_SIGNATURE", pop.signature, 0)?;
     }
     // Edition-Based Redefinition applies to token auth too — the reference writes
     // AUTH_ORA_EDITION after AUTH_ALTER_SESSION on both auth paths (messages/auth.pyx
     // `_write_message`); omitting it here silently ran token sessions under the
     // default edition.
     if let Some(edition) = edition {
-        write_key_value(&mut writer, "AUTH_ORA_EDITION", edition, 0)?;
+        write_key_value(writer, "AUTH_ORA_EDITION", edition, 0)?;
     }
     if !connect_string.is_empty() {
-        write_key_value(&mut writer, "AUTH_CONNECT_STRING", connect_string, 0)?;
+        write_key_value(writer, "AUTH_CONNECT_STRING", connect_string, 0)?;
     }
-    out.extend_from_slice(&writer.into_bytes());
     Ok(())
 }
 
-pub fn build_auth_phase_two_payload(
+pub fn build_auth_phase_two_payload<S>(
     user: &str,
-    encrypted: &crate::crypto::EncryptedPassword,
+    encrypted: &crate::crypto::EncryptedPassword<S>,
     driver_name: &str,
     version_num: u32,
     connect_string: &str,
@@ -199,9 +227,9 @@ pub fn build_auth_phase_two_payload(
     )
 }
 
-pub fn build_auth_phase_two_payload_with_seq(
+pub fn build_auth_phase_two_payload_with_seq<S>(
     user: &str,
-    encrypted: &crate::crypto::EncryptedPassword,
+    encrypted: &crate::crypto::EncryptedPassword<S>,
     driver_name: &str,
     version_num: u32,
     connect_string: &str,
@@ -218,9 +246,9 @@ pub fn build_auth_phase_two_payload_with_seq(
     )
 }
 
-pub fn build_auth_phase_two_payload_with_context_with_seq(
+pub fn build_auth_phase_two_payload_with_context_with_seq<S>(
     user: &str,
-    encrypted: &crate::crypto::EncryptedPassword,
+    encrypted: &crate::crypto::EncryptedPassword<S>,
     driver_name: &str,
     version_num: u32,
     connect_string: &str,
@@ -251,9 +279,9 @@ pub fn build_auth_phase_two_payload_with_context_with_seq(
 /// stray byte as part of the auth header and breaks the connection with a
 /// MARKER (observed live against Oracle XE 18c).
 #[allow(clippy::too_many_arguments)]
-pub fn build_auth_phase_two_payload_with_proxy_with_seq(
+pub fn build_auth_phase_two_payload_with_proxy_with_seq<S>(
     user: &str,
-    encrypted: &crate::crypto::EncryptedPassword,
+    encrypted: &crate::crypto::EncryptedPassword<S>,
     driver_name: &str,
     version_num: u32,
     connect_string: &str,

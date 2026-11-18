@@ -3504,6 +3504,7 @@ impl Connection {
                     .verifier_type
                     .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
                 let encrypted = oracledb_protocol::crypto::generate_verifier(
+                    &oracledb_protocol::crypto::RustCryptoProvider,
                     options.password.as_bytes(),
                     &auth_one.session_data,
                     verifier_type,
@@ -3533,10 +3534,15 @@ impl Connection {
                 let auth_two =
                     parse_auth_response_with_limits(&auth_two_response, protocol_limits)?;
                 oracledb_protocol::crypto::verify_server_response(
-                    &encrypted.combo_key,
+                    &oracledb_protocol::crypto::RustCryptoProvider,
+                    encrypted.combo_key.as_ref(),
                     &auth_two.session_data,
                 )?;
-                (auth_two, capabilities, encrypted.combo_key)
+                (
+                    auth_two,
+                    capabilities,
+                    encrypted.combo_key.as_ref().to_vec(),
+                )
             };
 
             let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
@@ -3758,6 +3764,7 @@ impl Connection {
         self.ensure_clean_before_request().await?;
         let (encoded_password, encoded_newpassword) =
             oracledb_protocol::crypto::encrypt_change_password_pair(
+                &oracledb_protocol::crypto::RustCryptoProvider,
                 &self.combo_key,
                 old_password.as_bytes(),
                 new_password.as_bytes(),

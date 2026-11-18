@@ -613,3 +613,73 @@ mod tests {
         assert_eq!(caps.charset_id, 873);
     }
 }
+
+/// The token phase-two frame (the fast-auth bundle when `fast_auth`, else the standalone classic
+/// message), written once into a buffer sized exactly up front.
+///
+/// The bearer token and the proof-of-possession pair are replayable credentials, so this path
+/// never lets a growing buffer reallocate and leave a copy behind: the exact length is measured
+/// first over public placeholders of the same lengths, then the frame is written into one
+/// allocation of that size. The returned `Vec` is the only copy; the caller moves it straight
+/// into its wiping type (store-oracle: `SecureVec::from(Vec)` takes the allocation, no copy).
+#[allow(clippy::too_many_arguments)] // public token-auth surface
+pub fn build_auth_phase_two_token_frame(
+    fast_auth: bool,
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    edition: Option<&str>,
+    pop: Option<TokenPop<'_>>,
+    proxy_user: Option<&str>,
+) -> Result<Vec<u8>> {
+    let prefix = if fast_auth {
+        Vec::from_hex(FAST_AUTH_PREFIX_HEX)
+            .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?
+    } else {
+        Vec::new()
+    };
+    // Measure over placeholders: the encoding's length depends only on the value lengths.
+    let token_shape = "x".repeat(token.len());
+    let header_shape = pop.map(|p| "x".repeat(p.header.len()));
+    let signature_shape = pop.map(|p| "x".repeat(p.signature.len()));
+    let shape_pop = match (&header_shape, &signature_shape) {
+        (Some(header), Some(signature)) => Some(TokenPop { header, signature }),
+        _ => None,
+    };
+    let mut measure = TtcWriter::new();
+    super::auth::write_auth_phase_two_token(
+        &mut measure,
+        user,
+        &token_shape,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+        shape_pop,
+        proxy_user,
+    )?;
+    let capacity = prefix.len() + measure.into_bytes().len();
+    let mut writer = TtcWriter::with_capacity(capacity);
+    writer.write_raw(&prefix);
+    super::auth::write_auth_phase_two_token(
+        &mut writer,
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+        pop,
+        proxy_user,
+    )?;
+    let frame = writer.into_bytes();
+    if frame.len() != capacity {
+        // Unreachable by construction; refuse rather than hand back a frame that may have moved.
+        return Err(ProtocolError::TtcDecode(
+            "token frame length changed while writing",
+        ));
+    }
+    Ok(frame)
+}
