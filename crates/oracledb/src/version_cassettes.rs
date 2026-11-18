@@ -751,7 +751,7 @@ fn loopback_for_replay(
         fetch_metadata_order: VecDeque::new(),
         dead: false,
         user: "cassette-replay".into(),
-        combo_key: Vec::new(),
+        combo_key: Vec::new().into(),
         statement_cache: Vec::new(),
         statement_cache_size: crate::STATEMENT_CACHE_SIZE,
         in_use_cursors: HashSet::new(),
